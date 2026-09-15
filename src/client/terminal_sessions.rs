@@ -1,4 +1,4 @@
-use std::io::{self, BufRead, Write as _};
+use std::io::{self, BufRead};
 
 use base64::Engine;
 use interprocess::local_socket::traits::Stream as _;
@@ -119,8 +119,14 @@ fn connect_terminal_session_stream(
     Ok(stream)
 }
 
-fn write_terminal_session_output(mut stream: LocalStream) -> io::Result<()> {
-    let mut stdout = io::stdout().lock();
+fn write_terminal_session_output(stream: LocalStream) -> io::Result<()> {
+    write_terminal_session_output_to(stream, &mut io::stdout().lock())
+}
+
+fn write_terminal_session_output_to(
+    mut stream: impl io::Read,
+    mut stdout: impl io::Write,
+) -> io::Result<()> {
     loop {
         match protocol::read_message(&mut stream, MAX_GRAPHICS_FRAME_SIZE) {
             Ok(ServerMessage::Terminal(frame)) => {
@@ -133,6 +139,16 @@ fn write_terminal_session_output(mut stream: LocalStream) -> io::Result<()> {
                     "height": frame.height,
                     "full": frame.full,
                     "bytes": encoded,
+                });
+                serde_json::to_writer(&mut stdout, &line)?;
+                stdout.write_all(b"\n")?;
+                stdout.flush()?;
+            }
+            Ok(ServerMessage::Clipboard { data }) => {
+                let line = serde_json::json!({
+                    "type": "terminal.clipboard",
+                    "encoding": "base64",
+                    "bytes": data,
                 });
                 serde_json::to_writer(&mut stdout, &line)?;
                 stdout.write_all(b"\n")?;
@@ -153,6 +169,43 @@ fn write_terminal_session_output(mut stream: LocalStream) -> io::Result<()> {
             Err(protocol::FramingError::UnexpectedEof) => return Ok(()),
             Err(err) => return Err(io::Error::other(err.to_string())),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn terminal_session_clipboard_is_a_separate_json_effect() {
+        let mut input = Vec::new();
+        protocol::write_message(
+            &mut input,
+            &ServerMessage::Clipboard {
+                data: "dGVzdA==".into(),
+            },
+        )
+        .unwrap();
+        protocol::write_message(&mut input, &ServerMessage::ServerShutdown { reason: None })
+            .unwrap();
+        let mut output = Vec::new();
+        write_terminal_session_output_to(input.as_slice(), &mut output).unwrap();
+        let output = String::from_utf8(output).unwrap();
+        let records = output
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            records,
+            vec![
+                serde_json::json!({"type": "terminal.clipboard", "encoding": "base64", "bytes": "dGVzdA=="}),
+                serde_json::json!({"type": "terminal.closed", "reason": null}),
+            ]
+        );
+        assert!(
+            !output.contains('\x1b'),
+            "JSON consumers apply clipboard effects themselves"
+        );
     }
 }
 

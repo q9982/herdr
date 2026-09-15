@@ -344,11 +344,19 @@ impl HeadlessServer {
                 }
                 false
             }
-            AppEvent::ClipboardWrite { content } => {
-                // Clipboard writes are client-local side effects. Forward them only to
-                // the foreground client instead of broadcasting to every attached client.
+            AppEvent::ClipboardWrite { pane_id, content } => {
+                // A direct controller owns its terminal's clipboard side effects.
+                // Observers never own them; without a controller preserve TUI routing.
+                let controller = self
+                    .terminal_id_for_pane(*pane_id)
+                    .and_then(|id| self.terminal_attach_owners.get(id.as_str()))
+                    .copied();
                 let data = base64::engine::general_purpose::STANDARD.encode(content.as_slice());
-                self.send_to_foreground_client(ServerMessage::Clipboard { data });
+                if let Some(client_id) = controller {
+                    self.send_to_client(client_id, ServerMessage::Clipboard { data });
+                } else {
+                    self.send_to_foreground_client(ServerMessage::Clipboard { data });
+                }
                 false
             }
             AppEvent::StateChanged { pane_id, agent, .. } => {
@@ -721,7 +729,7 @@ impl HeadlessServer {
     ///
     /// The server has no host terminal or audio subsystem, so we:
     /// - Forward `ClipboardWrite` as `ServerMessage::Clipboard` to the
-    ///   foreground client only.
+    ///   terminal controller, or the foreground client when there is no controller.
     /// - Detect when a sound would be played and forward as
     ///   `ServerMessage::Notify { kind: Sound }` to the foreground client.
     /// - Detect when a toast is set on AppState and forward as

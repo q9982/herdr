@@ -5409,6 +5409,140 @@ fn terminal_bell_targets_foreground_client_only() {
 }
 
 #[test]
+fn clipboard_write_targets_terminal_controller_without_redraw() {
+    with_terminal_session_test_server(|server, _, terminal_id, _| {
+        let control_rx = connect_pending_terminal_client_with_control_rx(server, 7);
+        assert!(
+            server.handle_server_event(ServerEvent::ClientControlTerminal {
+                client_id: 7,
+                target: terminal_id,
+                takeover: false,
+            })
+        );
+        while control_rx.recv_timeout(Duration::from_millis(100)).is_ok() {}
+
+        assert!(
+            !server.handle_internal_event_with_forwarding(AppEvent::ClipboardWrite {
+                pane_id: server.app.state.workspaces[0].tabs[0].root_pane,
+                content: b"test".to_vec(),
+            })
+        );
+        let message = control_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("controller clipboard write");
+        assert!(
+            matches!(read_server_message(message), ServerMessage::Clipboard { data } if data == "dGVzdA==")
+        );
+    });
+}
+
+#[test]
+fn clipboard_write_follows_takeover_and_excludes_observers_and_other_terminals() {
+    with_terminal_session_test_server(|server, _, terminal_id, _| {
+        let pane_id = server.app.state.workspaces[0].tabs[0].root_pane;
+        let foreground = connect_pending_terminal_client_with_control_rx(server, 1);
+        server.clients.get_mut(&1).unwrap().mode = ClientConnectionMode::ClientShell;
+        server.foreground_client_id = Some(1);
+        let observer = connect_pending_terminal_client_with_control_rx(server, 6);
+        server.handle_server_event(ServerEvent::ClientObserveTerminal {
+            client_id: 6,
+            target: terminal_id.clone(),
+        });
+        let first = connect_pending_terminal_client_with_control_rx(server, 7);
+        server.handle_server_event(ServerEvent::ClientControlTerminal {
+            client_id: 7,
+            target: terminal_id.clone(),
+            takeover: false,
+        });
+        let second = connect_pending_terminal_client_with_control_rx(server, 8);
+        server.handle_server_event(ServerEvent::ClientControlTerminal {
+            client_id: 8,
+            target: terminal_id,
+            takeover: true,
+        });
+        assert!(!server.clients.contains_key(&7));
+        for receiver in [&foreground, &observer, &first, &second] {
+            while receiver.recv_timeout(Duration::from_millis(100)).is_ok() {}
+        }
+
+        assert!(
+            !server.handle_internal_event_with_forwarding(AppEvent::ClipboardWrite {
+                pane_id,
+                content: b"test".to_vec(),
+            })
+        );
+        assert!(
+            matches!(read_server_message(second.recv_timeout(Duration::from_millis(100)).unwrap()),
+            ServerMessage::Clipboard { data } if data == "dGVzdA==")
+        );
+        for receiver in [&foreground, &observer, &first, &second] {
+            assert!(receiver.recv_timeout(Duration::from_millis(100)).is_err());
+        }
+
+        // Output from another terminal retains the existing full-TUI target.
+        let other = crate::workspace::Workspace::test_new("other");
+        let other_pane = other.tabs[0].root_pane;
+        server.app.state.workspaces.push(other);
+        server.app.state.ensure_test_terminals();
+        assert!(
+            !server.handle_internal_event_with_forwarding(AppEvent::ClipboardWrite {
+                pane_id: other_pane,
+                content: b"other".to_vec(),
+            })
+        );
+        assert!(
+            matches!(read_server_message(foreground.recv_timeout(Duration::from_millis(100)).unwrap()),
+            ServerMessage::Clipboard { data } if data == "b3RoZXI=")
+        );
+        assert!(second.recv_timeout(Duration::from_millis(100)).is_err());
+        assert!(observer.recv_timeout(Duration::from_millis(100)).is_err());
+
+        // Releasing control restores TUI delivery, never observer delivery.
+        server.remove_client_and_resize_if_needed(8);
+        while foreground.recv_timeout(Duration::from_millis(100)).is_ok() {}
+        assert!(
+            !server.handle_internal_event_with_forwarding(AppEvent::ClipboardWrite {
+                pane_id,
+                content: b"test".to_vec(),
+            })
+        );
+        assert!(
+            matches!(read_server_message(foreground.recv_timeout(Duration::from_millis(100)).unwrap()),
+            ServerMessage::Clipboard { data } if data == "dGVzdA==")
+        );
+        assert!(observer.recv_timeout(Duration::from_millis(100)).is_err());
+    });
+}
+
+#[test]
+fn clipboard_write_from_popup_targets_its_controller() {
+    with_terminal_session_test_server(|server, _, _, _| {
+        let (pane_id, terminal_id) = server.app.install_test_popup_runtime(
+            crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b""),
+        );
+        let control_rx = connect_pending_terminal_client_with_control_rx(server, 7);
+        assert!(
+            server.handle_server_event(ServerEvent::ClientControlTerminal {
+                client_id: 7,
+                target: terminal_id.to_string(),
+                takeover: false,
+            })
+        );
+        while control_rx.recv_timeout(Duration::from_millis(100)).is_ok() {}
+        assert!(
+            !server.handle_internal_event_with_forwarding(AppEvent::ClipboardWrite {
+                pane_id,
+                content: b"test".to_vec(),
+            })
+        );
+        assert!(
+            matches!(read_server_message(control_rx.recv_timeout(Duration::from_millis(100)).unwrap()),
+            ServerMessage::Clipboard { data } if data == "dGVzdA==")
+        );
+    });
+}
+
+#[test]
 fn clipboard_write_targets_foreground_client_only() {
     let mut server = test_headless_server();
     let (background_tx, background_control_rx, _background_rx) = test_client_writer();
@@ -5438,6 +5572,7 @@ fn clipboard_write_targets_foreground_client_only() {
     server.sync_foreground_client_state();
 
     let changed = server.handle_internal_event_with_forwarding(AppEvent::ClipboardWrite {
+        pane_id: crate::layout::PaneId::alloc(),
         content: b"test".to_vec(),
     });
 
@@ -5464,6 +5599,7 @@ fn clipboard_write_without_foreground_client_does_not_change_visual_state() {
     server.foreground_client_id = None;
 
     let changed = server.handle_internal_event_with_forwarding(AppEvent::ClipboardWrite {
+        pane_id: crate::layout::PaneId::alloc(),
         content: b"test".to_vec(),
     });
 
@@ -5490,6 +5626,7 @@ fn clipboard_write_failed_foreground_send_removes_client_without_visual_change()
     server.foreground_client_id = Some(1);
 
     let changed = server.handle_internal_event_with_forwarding(AppEvent::ClipboardWrite {
+        pane_id: crate::layout::PaneId::alloc(),
         content: b"test".to_vec(),
     });
 

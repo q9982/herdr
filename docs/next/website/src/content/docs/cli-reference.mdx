@@ -360,6 +360,13 @@ terminal, or agent target. It prints the same newline-delimited
 newline-delimited JSON commands on stdin: `terminal.input`, `terminal.resize`,
 `terminal.scroll`, and `terminal.release`. One controller can own a terminal at
 a time; use `--takeover` to replace it.
+Clipboard writes from the controlled terminal are delivered only to its current
+controller. Direct attach applies them through the client's clipboard writer;
+JSON control emits a separate
+`{"type":"terminal.clipboard","encoding":"base64","bytes":"..."}` record
+containing the clipboard bytes for the caller to apply. Clipboard effects are
+not screen frames and are never sent to observers. Without a direct controller,
+clipboard writes retain the foreground Herdr client's existing behavior.
 `terminal session observe` opens a read-only live terminal stream for a pane,
 terminal, or agent target. It prints newline-delimited JSON `terminal.frame`
 records with base64-encoded ANSI bytes, then a `terminal.closed` record when
