@@ -29,6 +29,11 @@ pub(super) fn command() -> Command {
                 .help("Print version and exit"),
         )
         .subcommand(completion::command())
+        .subcommand(
+            Command::new("codex-profile-path")
+                .about("Print the local Codex profile binding path for a pane (no server mutation)")
+                .arg(Arg::new("pane_id").required(true)),
+        )
         .subcommand(update_command())
         .subcommand(status_command())
         .subcommand(config_command())

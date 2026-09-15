@@ -103,6 +103,18 @@ pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
     }
 
     let exit_code = match command {
+        "codex-profile-path" => {
+            if args.len() != 3 {
+                eprintln!("usage: herdr codex-profile-path PANE_ID");
+                return Ok(CommandOutcome::Handled(2));
+            }
+            let path = crate::agent_resume::codex_profile::binding_path(
+                &crate::api::socket_path(),
+                &args[2],
+            )?;
+            println!("{}", path.display());
+            0
+        }
         "server" => {
             let Some(exit_code) = server::run_server_command(&args[2..])? else {
                 return Ok(CommandOutcome::NotCli);

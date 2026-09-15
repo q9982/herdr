@@ -196,7 +196,24 @@ impl App {
 
         let mut argv = vec![crate::detect::interactive_agent_executable(kind).to_string()];
         argv.extend(params.args);
-        let command = crate::platform::interactive_shell_command(&argv, &shell_name)
+        let codex_home = if kind == crate::detect::Agent::Codex {
+            crate::agent_resume::codex_profile::apply_binding(
+                &crate::api::socket_path(),
+                &params.pane_id,
+                &mut argv,
+            )
+            .map_err(|_| AgentStartError::InvalidArgument)?
+        } else {
+            None
+        };
+        let launch_argv = if let Some(home) = codex_home {
+            let mut launch = vec!["env".to_string(), format!("CODEX_HOME={}", home.display())];
+            launch.extend(argv.iter().cloned());
+            launch
+        } else {
+            argv.clone()
+        };
+        let command = crate::platform::interactive_shell_command(&launch_argv, &shell_name)
             .ok_or(AgentStartError::InvalidArgument)?;
         let bytes = crate::app::api_helpers::encode_api_submission(runtime, &command);
         let timeout = Duration::from_millis(

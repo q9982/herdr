@@ -217,7 +217,32 @@ impl App {
             return false;
         }
 
-        let Some(resume_command) = shell_command_from_argv(&plan.argv) else {
+        let mut argv = plan.argv.clone();
+        let mut profile_failed = false;
+        let codex_home = if plan.agent == "codex" {
+            let Some(public_id) = self
+                .find_pane(pane_id)
+                .and_then(|(ws_idx, _)| self.public_pane_id(ws_idx, pane_id))
+            else {
+                return false;
+            };
+            match crate::agent_resume::codex_profile::apply_binding(
+                &crate::api::socket_path(),
+                &public_id,
+                &mut argv,
+            ) {
+                Ok(home) => home,
+                Err(error) => {
+                    tracing::error!(%error, pane = %public_id, "Codex profile restore failed; refusing shared defaults");
+                    profile_failed = true;
+                    argv = vec!["printf".into(), "%s\\n".into(), format!("[herdr] Codex profile restore failed: {error}. Repair the binding, then attach again.")];
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let Some(resume_command) = shell_command_from_argv(&argv) else {
             tracing::warn!(
                 pane = pane_id.raw(),
                 terminal = %terminal_id,
@@ -226,9 +251,12 @@ impl App {
             );
             return false;
         };
+        let profile_env = codex_home
+            .map(|home| vec![("CODEX_HOME".into(), home.to_string_lossy().into_owned())])
+            .unwrap_or_default();
         let Some(launch_env) = self
             .find_pane(pane_id)
-            .and_then(|(ws_idx, _)| self.pane_launch_env(ws_idx, pane_id, Vec::new()))
+            .and_then(|(ws_idx, _)| self.pane_launch_env(ws_idx, pane_id, profile_env))
         else {
             return false;
         };
@@ -279,6 +307,11 @@ impl App {
 
         self.terminal_runtimes.insert(terminal_id.clone(), runtime);
         if let Some(terminal) = self.state.terminals.get_mut(&terminal_id) {
+            if profile_failed {
+                let saved_session = terminal.persisted_agent_session.clone();
+                terminal.clear_agent_runtime_identity_after_respawn();
+                terminal.persisted_agent_session = saved_session;
+            }
             terminal.pending_agent_resume_plan = None;
             terminal.respawn_shell_on_exit = false;
         }

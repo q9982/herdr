@@ -2,6 +2,8 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+pub(crate) mod codex_profile;
+
 const MAX_SESSION_ID_LEN: usize = 512;
 const MAX_SESSION_PATH_LEN: usize = 4096;
 
@@ -73,17 +75,35 @@ pub fn persisted_session_from_launch_args(
     agent: crate::detect::Agent,
     args: &[String],
 ) -> Option<PersistedAgentSession> {
-    let [command, session_id] = args else {
+    let mut remaining = Vec::new();
+    let mut profile_seen = false;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        let profile = if arg == "--profile" || arg == "-p" {
+            Some(args.next()?.as_str())
+        } else {
+            arg.strip_prefix("--profile=")
+        };
+        if let Some(profile) = profile {
+            if profile_seen || !codex_profile::valid_profile(profile) {
+                return None;
+            }
+            profile_seen = true;
+        } else {
+            remaining.push(arg);
+        }
+    }
+    let [command, session_id] = remaining.as_slice() else {
         return None;
     };
-    if agent != crate::detect::Agent::Codex || command != "resume" || session_id.starts_with('-') {
+    if agent != crate::detect::Agent::Codex || *command != "resume" || session_id.starts_with('-') {
         return None;
     }
 
     Some(PersistedAgentSession {
         source: "herdr:codex".into(),
         agent: "codex".into(),
-        session_ref: AgentSessionRef::id(session_id.clone())?,
+        session_ref: AgentSessionRef::id((*session_id).clone())?,
     })
 }
 
@@ -298,6 +318,22 @@ mod tests {
             "herdr:opencode",
             "opencode"
         ));
+    }
+
+    #[test]
+    fn codex_profile_resume_launch_preserves_session() {
+        for args in [
+            vec!["resume", "saved-session", "--profile", "herdr-c1"],
+            vec!["--profile", "herdr-c1", "resume", "saved-session"],
+            vec!["resume", "--profile=herdr-c1", "saved-session"],
+        ] {
+            let args = args.into_iter().map(str::to_owned).collect::<Vec<_>>();
+            let session = persisted_session_from_launch_args(crate::detect::Agent::Codex, &args);
+            assert_eq!(
+                session.map(|s| s.session_ref.value),
+                Some("saved-session".into())
+            );
+        }
     }
 
     #[test]
