@@ -3,7 +3,7 @@
 # managed by herdr; reinstalling or updating the integration overwrites this file.
 # add custom hooks beside this file instead of editing it.
 # HERDR_INTEGRATION_ID=grok
-# HERDR_INTEGRATION_VERSION=1
+# HERDR_INTEGRATION_VERSION=2
 
 set -eu
 
@@ -63,6 +63,10 @@ hook_event_name = first_text("hook_event_name", "hookEventName")
 if hook_event_name not in (None, "session_start", "SessionStart", "sessionStart"):
     raise SystemExit(0)
 
+# A child session must never replace its parent pane's native identity.
+if hook_input.get("subagentType") or hook_input.get("subagent_type"):
+    raise SystemExit(0)
+
 # Grok injects GROK_SESSION_ID into every hook process; prefer it and fall
 # back to the event payload's session id fields.
 session_id = os.environ.get("GROK_SESSION_ID") or first_text("session_id", "sessionId")
@@ -83,6 +87,11 @@ request = {
         "agent_session_id": agent_session_id,
     },
 }
+
+# Grok emits source=load when switching to a resumed/forked conversation.
+# Only this observed transition authorizes replacing an existing identity.
+if hook_event_name is not None and first_text("source") == "load":
+    request["params"]["session_start_source"] = "resume"
 
 try:
     client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)

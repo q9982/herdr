@@ -2,7 +2,7 @@
 # managed by herdr; reinstalling or updating the integration overwrites this file.
 # add custom hooks beside this file instead of editing it.
 # HERDR_INTEGRATION_ID=grok
-# HERDR_INTEGRATION_VERSION=1
+# HERDR_INTEGRATION_VERSION=2
 
 param([string]$Action = "")
 
@@ -25,6 +25,7 @@ $event = if ($null -ne $payload -and $payload.hook_event_name -is [string]) {
     $null
 }
 if ($null -ne $event -and $event -notin @("session_start", "SessionStart", "sessionStart")) { exit 0 }
+if ($null -ne $payload -and ($payload.subagentType -or $payload.subagent_type)) { exit 0 }
 
 $sessionId = $env:GROK_SESSION_ID
 if ([string]::IsNullOrWhiteSpace($sessionId) -and $null -ne $payload) {
@@ -35,7 +36,14 @@ if ([string]::IsNullOrWhiteSpace($sessionId)) { exit 0 }
 
 $seq = [DateTime]::UtcNow.Ticks
 $herdr = if ([string]::IsNullOrWhiteSpace($env:HERDR_BIN_PATH)) { "herdr" } else { $env:HERDR_BIN_PATH }
+$reportArgs = @("pane", "report-agent-session", $env:HERDR_PANE_ID,
+    "--source", "herdr:grok", "--agent", "grok", "--seq", $seq,
+    "--agent-session-id", $sessionId)
+# Match the Unix hook: only Grok's load transition permits replacement.
+if ($null -ne $event -and $null -ne $payload -and $payload.source -ceq "load") {
+    $reportArgs += @("--session-start-source", "resume")
+}
 try {
-    & $herdr pane report-agent-session $env:HERDR_PANE_ID --source herdr:grok --agent grok --seq $seq --agent-session-id $sessionId 2>$null | Out-Null
+    & $herdr @reportArgs 2>$null | Out-Null
 } catch {
 }

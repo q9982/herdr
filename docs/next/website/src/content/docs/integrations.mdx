@@ -325,6 +325,8 @@ herdr integration install grok
 
 The hook reports session identity through Grok's `SessionStart` hook while Grok CLI runs inside a Herdr pane. Grok state comes from Herdr's screen manifest detection.
 
+Grok integration v2 maps `SessionStart` with `source=load` to a native resume transition. This updates the saved conversation when Grok loads a fork into the same pane. Replacement requires a live detected Grok process and a sequenced report; unknown sources cannot replace an existing session, and child-session reports are ignored. Reinstall the Grok integration after upgrading Herdr to update the installed hook. A rewind that keeps the same session ID needs no identity change.
+
 Herdr uses `~/.grok` by default, or `GROK_HOME` when set. The Grok config directory must already exist. Grok merges every `hooks/*.json` file in that directory, so install writes a self-contained `hooks/herdr.json` with the Herdr `SessionStart` entry next to `hooks/herdr-agent-state.sh` (`hooks/herdr-agent-state.ps1` on Windows), and never edits other hook files. Uninstall removes exactly those two Herdr-owned files.
 
 After Grok emits a session start event, Herdr can use the reported session id to resume the pane with `grok --resume <id>`.

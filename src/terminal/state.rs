@@ -1328,6 +1328,7 @@ impl TerminalState {
                 "codex",
                 Some("startup" | "clear" | "resume" | "compact")
             ) | ("herdr:mastracode", "mastracode", Some("startup"))
+                | ("herdr:grok", "grok", Some("resume"))
                 | ("herdr:hermes", "hermes", Some("startup" | "new" | "resume"))
                 | ("herdr:opencode", "opencode", Some("select"))
                 | ("herdr:pi", "pi", Some("new" | "resume" | "fork"))
@@ -1528,8 +1529,10 @@ impl TerminalState {
             &agent_label,
             session_start_source.as_deref(),
         );
+        let grok_session_report = (source.as_str(), agent_label.as_str()) == ("herdr:grok", "grok");
         let replacing_identity_only_session =
-            crate::detect::session_identity_only_integration(&source, &agent_label)
+            (crate::detect::session_identity_only_integration(&source, &agent_label)
+                || grok_session_report)
                 && session_replacement_allowed
                 && self.current_session_identity_for_persistence().is_some_and(
                     |(current_source, current_agent, current_kind, current_value)| {
@@ -1540,7 +1543,11 @@ impl TerminalState {
                             && current_value != session_ref.value
                     },
                 );
-        if replacing_identity_only_session && !process_present {
+        // Grok's SessionStart(load) hook maps to resume. Require a sequenced
+        // report as well as the matching live process before changing its ID.
+        if replacing_identity_only_session
+            && (!process_present || (grok_session_report && seq.is_none()))
+        {
             return None;
         }
         let owner_conflicts = self.current_session_owner_conflicts(&source, &agent_label);
@@ -4549,6 +4556,141 @@ mod tests {
                 "{session_start_source} should store the replacement session"
             );
         }
+    }
+
+    #[test]
+    fn grok_resume_replaces_session_only_for_live_matching_process() {
+        for detected in [Some(Agent::Grok), Some(Agent::Claude), None] {
+            let mut terminal = test_terminal();
+            terminal
+                .set_agent_session_ref(
+                    "herdr:grok".into(),
+                    "grok".into(),
+                    crate::agent_resume::AgentSessionRef::id("old"),
+                    Some(20),
+                )
+                .expect("initial session");
+            terminal.set_detected_state(detected, AgentState::Idle);
+            let mutation = terminal.set_agent_session_ref_for_session_start(
+                "herdr:grok".into(),
+                "grok".into(),
+                crate::agent_resume::AgentSessionRef::id("new"),
+                Some(21),
+                Some("resume".into()),
+            );
+            if detected == Some(Agent::Grok) {
+                assert!(
+                    mutation
+                        .expect("foreground Grok resume")
+                        .session_ref_changed
+                );
+                assert_eq!(
+                    terminal
+                        .persisted_agent_session
+                        .as_ref()
+                        .unwrap()
+                        .session_ref
+                        .value,
+                    "new"
+                );
+            } else {
+                assert!(mutation.is_none());
+                assert_eq!(
+                    terminal
+                        .persisted_agent_session
+                        .as_ref()
+                        .unwrap()
+                        .session_ref
+                        .value,
+                    "old"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn grok_resume_rejects_stale_or_unqualified_replacement() {
+        for (seq, source) in [
+            (None, Some("resume")),
+            (Some(20), Some("resume")),
+            (Some(19), Some("resume")),
+            (Some(21), None),
+            (Some(21), Some("load")),
+            (Some(21), Some("startup")),
+        ] {
+            let mut terminal = test_terminal();
+            terminal
+                .set_agent_session_ref(
+                    "herdr:grok".into(),
+                    "grok".into(),
+                    crate::agent_resume::AgentSessionRef::id("old"),
+                    Some(20),
+                )
+                .expect("initial session");
+            terminal.set_detected_state(Some(Agent::Grok), AgentState::Idle);
+            let mutation = terminal.set_agent_session_ref_for_session_start(
+                "herdr:grok".into(),
+                "grok".into(),
+                crate::agent_resume::AgentSessionRef::id("new"),
+                seq,
+                source.map(str::to_string),
+            );
+            assert!(mutation.is_none(), "seq={seq:?} source={source:?}");
+            assert_eq!(
+                terminal
+                    .persisted_agent_session
+                    .as_ref()
+                    .unwrap()
+                    .session_ref
+                    .value,
+                "old"
+            );
+        }
+    }
+
+    #[test]
+    fn grok_resume_preserves_identity_after_exit_and_on_duplicate() {
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Grok), AgentState::Idle);
+        terminal
+            .set_agent_session_ref(
+                "herdr:grok".into(),
+                "grok".into(),
+                crate::agent_resume::AgentSessionRef::id("old"),
+                Some(20),
+            )
+            .expect("initial session");
+        let duplicate = terminal
+            .set_agent_session_ref_for_session_start(
+                "herdr:grok".into(),
+                "grok".into(),
+                crate::agent_resume::AgentSessionRef::id("old"),
+                Some(21),
+                Some("resume".into()),
+            )
+            .expect("duplicate identity accepted");
+        assert!(!duplicate.session_ref_changed);
+        terminal.recent_agent_process_exit = Some(super::RecentAgentProcessExit {
+            agent: Agent::Grok,
+            observed_at: std::time::Instant::now(),
+        });
+        let delayed = terminal.set_agent_session_ref_for_session_start(
+            "herdr:grok".into(),
+            "grok".into(),
+            crate::agent_resume::AgentSessionRef::id("new"),
+            Some(22),
+            Some("resume".into()),
+        );
+        assert!(delayed.is_none());
+        assert_eq!(
+            terminal
+                .persisted_agent_session
+                .as_ref()
+                .unwrap()
+                .session_ref
+                .value,
+            "old"
+        );
     }
 
     #[test]
